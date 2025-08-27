@@ -32,12 +32,14 @@ eps = 1e-8
 # ## delta_ema
 
 # %% [markdown]
-# 📌 Описание функции **delta_ema** *(df, ema_lenght=[20], block_size=5, shifts=None)*\
+# 📌 Описание функции **delta_ema** *(df, ema_lengths=[20], window_size=20, num_blocks=4)*\
 # **Вход:**
 # - **df** — DataFrame с историческими свечами и обязательной колонкой Close.
-# - **ema_lengths** — список длин EMA, например [20, 50].
+# - **ema_lengths** — список длин EMA, например [20, 50]
+# - **tema_lengths** — список длин TEMA, например
 # - **window_size** — общее кол-во свечей для анализа
 # - **num_blocks** — на сколько частей делим окно
+# - **norm_period** — размер скользящего окна для нормализации
 #
 # **Что делает:**\
 # Для каждой EMA из списка **ema_lenghts**:
@@ -51,17 +53,18 @@ eps = 1e-8
 # emaXX_grow_blocks — количество растущих блоков для данной EMA.
 
 # %%
-def delta_ema(df, ema_lengths=[20], window_size=20, num_blocks=4):
-    close_norn = df['Close'] / df['Close'].rolling(20).max()
+def delta_ema(df, ema_lengths=[20], tema_lengths=[9], window_size=20, num_blocks=4):
+    close = df['Close']
     block_size = window_size // num_blocks
     shifts = [block_size * i for i in range(1, num_blocks + 1)]
 
     df = df.copy()
 
+    # Обработка EMA (на обычной цене)
     for ema_length in ema_lengths:
-        ema = ta.ema(close_norn, ema_length)
+        ema = ta.ema(close, ema_length)
 
-        # Изменения EMA в каждом блоке
+        # Относительные изменения и так нормализованы
         for i, shift in enumerate(shifts, 1):
             start_vals = ema.shift(shift - block_size)
             end_vals = ema.shift(shift)
@@ -70,6 +73,20 @@ def delta_ema(df, ema_lengths=[20], window_size=20, num_blocks=4):
         # Кол-во растущих блоков
         grow_flags = [(ema.shift(s) > ema.shift(s - block_size)) for s in shifts]
         df[f'ema{ema_length}_grow_blocks'] = pd.concat(grow_flags, axis=1).sum(axis=1).astype(int)
+
+    # Обработка TEMA
+    for tema_length in tema_lengths:
+        tema = ta.tema(close, tema_length)
+
+        # Изменения TEMA в каждом блоке
+        for i, shift in enumerate(shifts, 1):
+            start_vals = tema.shift(shift - block_size)
+            end_vals = tema.shift(shift)
+            df[f'block{i}_tema{tema_length}_rel_change'] = (end_vals - start_vals) / start_vals
+
+        # Кол-во растущих блоков для TEMA
+        grow_flags = [(tema.shift(s) > tema.shift(s - block_size)) for s in shifts]
+        df[f'tema{tema_length}_grow_blocks'] = pd.concat(grow_flags, axis=1).sum(axis=1).astype(int)
 
     return df
 
@@ -134,6 +151,99 @@ def ema_speed(df, lengths=[20, 50], windows=[10, 30, 60]):
 
 
 # %% [markdown]
+# ## ema_price_distance
+
+# %% [markdown]
+# **ema_price_distance** Добавляет относительное расстояние между EMA и ценой закрытия, а также динамику изменения этого расстояния.
+#     
+# Вход:
+# - df: DataFrame с колонкой 'Close'
+# - ema_periods: список периодов EMA
+# - norm_window: окно для нормализации (скользящее среднее цены)
+# - change_windows: список окон для расчета динамики изменения
+#     
+# Выход:
+# - Копия DataFrame с добавленными колонками:
+# * ema{period}_distance: относительное расстояние EMA от цены
+# * ema{period}_change_{window}: нормализованное изменение расстояния
+#
+
+# %%
+def ema_price_distance(df, ema_periods=[20, 50], norm_window=200, change_windows=[3, 10]):
+    """
+    Добавляет относительное расстояние между EMA и ценой закрытия,
+    а также динамику изменения этого расстояния.
+    
+    Вход:
+    - df: DataFrame с колонкой 'Close'
+    - ema_periods: список периодов EMA
+    - norm_window: окно для нормализации (скользящее среднее цены)
+    - change_windows: список окон для расчета динамики изменения
+    
+    Выход:
+    - Копия DataFrame с добавленными колонками:
+      * ema{period}_distance: относительное расстояние EMA от цены
+      * ema{period}_change_{window}: нормализованное изменение расстояния
+    """
+    df = df.copy()
+    
+    # Базовое скользящее среднее для нормализации
+    base_ma = df['Close'].rolling(norm_window).mean()
+    
+    for period in ema_periods:
+        # Вычисляем EMA
+        ema = ta.ema(df['Close'], length=period)
+        
+        # Относительное расстояние EMA от цены (в % от базового MA)
+        distance = (df['Close'] - ema) / base_ma
+        df[f'ema{period}_distance'] = distance
+        
+        # Динамика изменения расстояния (нормализованная через процентное изменение)
+        for window in change_windows:
+            # Процентное изменение расстояния за window периодов
+            pct_change = distance.pct_change(window)
+            
+            # Нормализация через tanh для ограничения экстремальных значений
+            normalized_change = np.tanh(pct_change.fillna(0))
+            
+            df[f'ema{period}_change_{window}'] = normalized_change
+    
+    return df
+
+
+# %% [markdown]
+# # TEMA
+
+# %% [markdown]
+# Функция **tema_slope_change**.
+#
+# Вход: DataFrame с колонкой 'Close', списки периодов TEMA **tema_periods** и окон расчета наклона **slope_windows**
+#
+# Выход: Копия DataFrame с добавленными колонками нормализованных изменений наклона TEMA
+
+# %%
+def tema_slope_change(df, tema_periods=[5], slope_windows=[3]):
+    df = df.copy()
+    
+    for tema_period in tema_periods:
+        for slope_window in slope_windows:
+            # Считаем TEMA
+            tema = ta.tema(df['Close'], length=tema_period)
+            
+            # Считаем угол наклона TEMA (первая производная)
+            tema_slope = ta.slope(close=tema, length=slope_window)
+            
+            # Относительное изменение угла наклона
+            tema_slope_change = tema_slope / tema_slope.rolling(slope_window).mean().abs()
+            
+            # Нормализация с помощью tanh
+            col_name = f'tema_slope_change_tp{tema_period}_sw{slope_window}'
+            df[col_name] = np.tanh(tema_slope_change)
+    
+    return df
+
+
+# %% [markdown]
 # # MACD
 
 # %% [markdown]
@@ -167,36 +277,34 @@ def macd_cross(df, fast=12, slow=26, signal=9):
 # ## delta_macd
 
 # %% [markdown]
-# 📌 Рассчитывает относительные изменения MACD-компонент от текущей свечи\
-# и добавляет признак наличия лонгового пересечения за последние cross_lookback свечей.
+# 📌 Добавляет базовые компоненты MACD, угол наклона гистограммы и признак лонгового пересечения за последние cross_lookback свечей.
 #
 # Параметры:
 # - fast, slow, signal — стандартные параметры MACD
-# - shifts — список отступов (в свечах) от текущей для расчёта относительного изменения
+# - slope_length — период для расчёта угла наклона гистограммы MACD
 # - cross_lookback — кол-во последних свечей, в которых ищется лонговое пересечение
-#
 
 # %%
-def delta_macd(df, fast=12, slow=26, signal=9, shifts=[1, 5, 10, 20], cross_lookback=5):
-   
-
+def macd(df, fast=12, slow=26, signal=9, slope_length=5, cross_lookback=5):
     df = df.copy()
 
-    # Считаем MACD и его компоненты во временных переменных
+    # Считаем MACD и его компоненты
     macd_df = ta.macd(df['Close'], fast=fast, slow=slow, signal=signal)
     macd = macd_df[f'MACD_{fast}_{slow}_{signal}']
     macd_signal = macd_df[f'MACDs_{fast}_{slow}_{signal}']
     macd_hist = macd_df[f'MACDh_{fast}_{slow}_{signal}']
 
-    # Относительные изменения от текущей свечи
-    for name, series in [('macd', macd), ('macd_signal', macd_signal), ('macd_hist', macd_hist)]:
-        for shift in shifts:
-            shifted_vals = series.shift(shift)
-            df[f'{name}_rel_change_{shift}'] = (series - shifted_vals) / (shifted_vals + 1e-9)
+    # Базовые признаки MACD
+    df[f'macd_{fast}_{slow}_{signal}'] = macd
+    df[f'macd_signal_{fast}_{slow}_{signal}'] = macd_signal
+    df[f'macd_hist_{fast}_{slow}_{signal}'] = macd_hist
+
+    # Угол наклона гистограммы за последние slope_length свечей
+    df[f'macd_hist_slope_{fast}_{slow}_{signal}_{slope_length}'] = macd_hist.diff(slope_length) / slope_length
 
     # Лонговое пересечение MACD за последние N свечей
     macd_cross_long = (macd > macd_signal) & (macd.shift(1) <= macd_signal.shift(1))
-    df['macd_long_signal_lastN'] = macd_cross_long.rolling(cross_lookback, min_periods=1).max().astype(int)
+    df[f'macd_long_signal_{fast}_{slow}_{signal}_{cross_lookback}'] = macd_cross_long.rolling(cross_lookback, min_periods=1).max().astype(int)
 
     return df
 
@@ -291,9 +399,8 @@ def delta_ema_volume(df, ema_lengths=[20], window_size=20, num_blocks=4):
 # %%
 def regression_slope_price(df, n=[5, 10, 20, 60]):
     df = df.copy()
-    close_norn = df['Close'] / df['Close'].rolling(20).max()
     for window in n:
-        df[f'price_slope_{window}'] = ta.slope(close_norn, length=window)        
+        df[f'price_slope_{window}'] = ta.slope(df['Close'], length=window)
     return df
 
 
@@ -303,10 +410,9 @@ def regression_slope_price(df, n=[5, 10, 20, 60]):
 
 # %%
 def regression_slope_volume(df, n=[5, 10, 20, 60]):
-    volume_norn = df['Volume'] / df['Volume'].rolling(20).max()
     df = df.copy()
     for window in n:
-        df[f'volume_slope_{window}'] = ta.slope(volume_norn, length=window)
+        df[f'volume_slope_{window}'] = ta.slope(df['Volume'], length=window)
     return df
 
 
@@ -331,14 +437,17 @@ def regression_slope_volume(df, n=[5, 10, 20, 60]):
 # %%
 def delta_rsi(df, rsi_lengths=[21], window_size=20, num_blocks=4):
   
-    close_norm = df['Close'] / df['Close'].rolling(window_size).max()
+    close = df['Close']
     block_size = window_size // num_blocks
     shifts = [block_size * i for i in range(1, num_blocks + 1)]
 
     df = df.copy()
 
     for rsi_length in rsi_lengths:
-        rsi = ta.rsi(close_norm, length=rsi_length)
+        rsi = ta.rsi(close, length=rsi_length)
+
+        # Добавляем RSI (от 0 до 1)
+        df[f'rsi{rsi_length}'] = rsi / 100
 
         # Изменения RSI и среднее значение по каждому блоку
         for i, shift in enumerate(shifts, 1):
@@ -346,7 +455,8 @@ def delta_rsi(df, rsi_lengths=[21], window_size=20, num_blocks=4):
             end_vals = rsi.shift(shift)
             df[f'block{i}_rsi{rsi_length}_rel_change'] = (end_vals - start_vals) / start_vals
 
-            block_vals = rsi.shift(shift - block_size).rolling(block_size).mean()
+            # Среднее значение RSI от 0 до 1
+            block_vals = rsi.shift(shift - block_size).rolling(block_size).mean() / 100 
             df[f'block{i}_rsi{rsi_length}_mean'] = block_vals
 
         # Кол-во растущих блоков
@@ -385,6 +495,35 @@ def rsi_speed(df, lengths=[21], windows=[10, 30, 60]):
             accel_col = f'rsi{length}_accel_{window}'
             df[accel_col] = df[speed_col].diff(window) / window
             
+    return df
+
+
+# %% [markdown]
+# ## rsi_divergence
+
+# %% [markdown]
+# Добавляет сигналы дивергенций rsi и цены.
+#
+# Параметры:
+# - смещение **shift** для расчета дивергенции
+# - **period** - периоды rsi
+
+# %%
+def rsi_divergence(df, shift=[5, 10], period=[14]):
+    df = df.copy()
+
+    for p in period:
+        rsi = ta.rsi(df['Close'], length=p)
+
+        for s in shift:
+            col_name = f"bullish_rsi_div_p{p}_s{s}"
+            
+            # Условие бычьей дивергенции
+            df[col_name] = (
+                (df['Low'] < df['Low'].shift(s)) &   # цена обновила минимум
+                (rsi > rsi.shift(s))                 # RSI сделал выше минимум
+            ).astype(int)
+
     return df
 
 # %%
