@@ -77,6 +77,7 @@ def add_target_column(df, target_candles=20, target=0.04, rr_threshold=2.0):
 # - **min_margin** - минимальное движение внутри окна
 # - **min_price_distance** - минимальное расстояние в цене (в процентах) между сигналами
 # - **target_candles** — количество свечей для проверки достижения целевого движения
+# - **rr_threshold** - соотношение движения цены long/short после минимума
 #
 # Возвращает: DataFrame с колонками:
 # - **buy_noised, sell_noised** — базовые шумные сигналы
