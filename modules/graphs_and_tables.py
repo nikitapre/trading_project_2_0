@@ -1048,6 +1048,9 @@ def plot_predict_signals(df, y_pred=None, pred_threshold=0.5, start_idx=200, end
 # # Бэктест модели
 
 # %% [markdown]
+# ## backtest_model
+
+# %% [markdown]
 # **backtest_model** Проводит пошаговый бэктест торговой модели с TP/SL и анализирует результаты
 #
 # Аргументы:
@@ -1226,5 +1229,165 @@ def backtest_model(df, model, X_train, threshold=0.5, tp_pct=0.04, rr=2.0, plot=
         print("⚠️ Нет сделок для построения графиков")
 
     return results
+
+
+# %% [markdown]
+# ## backtest_threshold_analysis
+
+# %% [markdown]
+# **backtest_threshold_analysis**
+# Анализирует прибыльность модели по сетке порогов: для каждого **threshold** запускается пошаговый бэктест с **TP/SL** и собираются ключевые метрики.
+#
+# Аргументы:
+# - df — DataFrame с OHLCV и признаками.
+# - model — обученная модель.
+# - X_train — тренировочный DataFrame (используется для выбора feature_cols).
+# - thresholds — список порогов.
+# - tp_pct — take-profit.
+# - rr — risk/reward ratio (SL = TP / rr).
+# - plot — рисовать график зависимости прибыли от порога.
+#
+# Возвращает
+# - DataFrame с колонками: threshold, total_profit, tp_count, sl_count, total_trades, win_rate, avg_profit_per_trade.
+# - При plot=True — график total_profit vs threshold с пометкой оптимального порога.
+
+# %%
+def backtest_threshold_analysis(df, model, X_train, thresholds=np.linspace(0.3, 0.9, 10), 
+                               tp_pct=0.04, rr=2.0, plot=True):
+    """
+    Анализ прибыльности модели на различных пороговых значениях.
+    
+    """
+    
+    feature_cols = [col for col in X_train.columns if col in df.columns]
+    
+    if not feature_cols:
+        print("❌ Нет доступных фич для предсказания!")
+        return None
+    
+    preds = model.predict_proba(df[feature_cols])[:, 1]
+    df = df.copy()
+    df['pred'] = preds
+
+    sl_pct = tp_pct / rr
+    results = []
+    
+    for threshold in thresholds:
+        print(f"Тестируем порог: {threshold:.3f}")
+        
+        all_trades = []
+        current_trade = None
+        i = 0
+        n = len(df)
+
+        while i < n:
+            row = df.iloc[i]
+            
+            # Если есть открытая сделка - проверяем условия выхода
+            if current_trade is not None:
+                low_price = row['Low']
+                high_price = row['High']
+                
+                # Проверяем SL
+                if low_price <= current_trade['sl_price']:
+                    current_trade['exit_date'] = row['Date']
+                    current_trade['outcome'] = 'SL'
+                    current_trade['profit_pct'] = -sl_pct
+                    all_trades.append(current_trade)
+                    current_trade = None
+                    i += 1  # Пропускаем текущую свечу
+                    continue
+                
+                # Проверяем TP
+                if high_price >= current_trade['tp_price']:
+                    current_trade['exit_date'] = row['Date']
+                    current_trade['outcome'] = 'TP'
+                    current_trade['profit_pct'] = tp_pct
+                    all_trades.append(current_trade)
+                    current_trade = None
+                    i += 1  # Пропускаем текущую свечу
+                    continue
+            
+            # Если нет сделки — ищем вход (только если current_trade is None)
+            if current_trade is None:
+                if row['pred'] >= threshold:
+                    entry_price = row['Close']
+                    tp_price = entry_price * (1 + tp_pct)
+                    sl_price = entry_price * (1 - sl_pct)
+
+                    current_trade = {
+                        'entry_date': row['Date'],
+                        'entry_price': entry_price,
+                        'tp_price': tp_price,
+                        'sl_price': sl_price,
+                        'exit_date': None,
+                        'outcome': None,
+                        'profit_pct': 0
+                    }
+            
+            i += 1
+
+        # Закрываем последнюю сделку, если осталась
+        if current_trade is not None:
+            current_trade['exit_date'] = df['Date'].iloc[-1]
+            current_trade['outcome'] = 'SL'
+            exit_price = df['Close'].iloc[-1]
+            pct_change = (exit_price - current_trade['entry_price']) / current_trade['entry_price']
+            current_trade['profit_pct'] = pct_change
+            all_trades.append(current_trade)
+
+        # Остальная логика остается без изменений...
+        trades_df = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
+
+        if not trades_df.empty:
+            total_profit = trades_df['profit_pct'].sum() * 100
+            tp_count = (trades_df['outcome'] == 'TP').sum()
+            sl_count = (trades_df['outcome'] == 'SL').sum()
+            total_trades = len(trades_df)
+            win_rate = tp_count / total_trades
+            
+            results.append({
+                'threshold': threshold,
+                'total_profit': total_profit,
+                'tp_count': tp_count,
+                'sl_count': sl_count,
+                'total_trades': total_trades,
+                'win_rate': win_rate,
+                'avg_profit_per_trade': total_profit / total_trades
+            })
+        else:
+            results.append({
+                'threshold': threshold,
+                'total_profit': 0,
+                'tp_count': 0,
+                'sl_count': 0,
+                'total_trades': 0,
+                'win_rate': 0,
+                'avg_profit_per_trade': 0
+            })
+
+    results_df = pd.DataFrame(results)
+    
+    if plot:
+        plt.figure(figsize=(12, 6))
+        plt.plot(results_df['threshold'], results_df['total_profit'], 
+                marker='o', linewidth=2, markersize=6, color='blue')
+        plt.xlabel('Пороговое значение')
+        plt.ylabel('Общая прибыль (%)')
+        plt.title('Зависимость прибыли от порогового значения')
+        plt.grid(True, alpha=0.3)
+        
+        if not results_df.empty:
+            best_idx = results_df['total_profit'].idxmax()
+            best_threshold = results_df.loc[best_idx, 'threshold']
+            best_profit = results_df.loc[best_idx, 'total_profit']
+            plt.axvline(x=best_threshold, color='red', linestyle='--', 
+                       label=f'Оптимальный порог: {best_threshold:.3f}\nПрибыль: {best_profit:.2f}%')
+            plt.legend()
+        
+        plt.tight_layout()
+        plt.show()
+    
+    return results_df
 
 # %%
